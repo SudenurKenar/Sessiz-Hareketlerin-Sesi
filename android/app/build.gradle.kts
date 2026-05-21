@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.sudenur.isaret_dili_cevirici"
-    compileSdk = 35
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -19,8 +19,11 @@ android {
         applicationId = "com.sudenur.isaret_dili_cevirici"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
-        targetSdk = 35
+        
+        // ❌ ESKİ SATIR: minSdk = flutter.minSdkVersion
+        minSdk = 24 // 🚀 YENİ SATIR: Doğrudan 24 olarak sabitledik!
+        
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

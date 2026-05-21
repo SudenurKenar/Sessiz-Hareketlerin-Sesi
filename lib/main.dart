@@ -1,246 +1,149 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:camera/camera.dart';
-import 'onnx_helper.dart';
+import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
-List<CameraDescription> _availableCameras = [];
-
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  try {
-    _availableCameras = await availableCameras();
-  } catch (e) {
-    print("ERROR: Kamera listesi alınamadı: $e");
-  }
-  runApp(const SignLanguageApp());
+  runApp(const MyApp());
 }
 
-class SignLanguageApp extends StatelessWidget {
-  const SignLanguageApp({super.key});
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      title: 'İşaret Dili Çevirici',
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: Colors.black,
       ),
-      home: const CameraTranslationScreen(),
+      home: const SignLanguageScreen(),
     );
   }
 }
 
-class CameraTranslationScreen extends StatefulWidget {
-  const CameraTranslationScreen({super.key});
+class SignLanguageScreen extends StatefulWidget {
+  const SignLanguageScreen({super.key});
 
   @override
-  State<CameraTranslationScreen> createState() => _CameraTranslationScreenState();
+  State<SignLanguageScreen> createState() => _SignLanguageScreenState();
 }
 
-class _CameraTranslationScreenState extends State<CameraTranslationScreen> {
-  CameraController? _cameraController;
-  final OnnxHelper _onnxHelper = OnnxHelper();
+class _SignLanguageScreenState extends State<SignLanguageScreen> {
+  String _currentWord = "İşaret Bekleniyor...";
+  String _lastConfirmedWord = "";
+  int _sameWordCount = 0;
+  static const int _confirmThreshold = 4; // Kaç kez üst üste görünmeli
+  DateTime _lastUpdate = DateTime.now();
 
-  String _result = "İşaret bekleniyor...";
-  bool _isProcessing = false;
-  bool _isCameraReady = false;
-  CameraLensDirection _lens = CameraLensDirection.back;
+  void _handleResults(List<dynamic> results) {
+    final now = DateTime.now();
 
-  final List<String> _recentPredictions = [];
-  static const int _windowSize = 4; // Kararlılık için biriktirilen son 4 tahmin
-  int _frameCount = 0;
-  static const int _skipFrames = 5; // 👑 Kasılmayı önlemek için her 5 karede bir çıkarım koşturuyoruz (Saniyede ~6 net kare)
+    if (results.isNotEmpty) {
+      final top = results.first;
+      if (top.confidence > 0.50) {
+        final word = top.className ?? "";
 
-  @override
-  void initState() {
-    super.initState();
-    _init();
-  }
-
-  Future<void> _init() async {
-    if (!mounted) return;
-    setState(() => _isCameraReady = false);
-
-    await _onnxHelper.initModel();
-
-    if (_cameraController != null) {
-      try { await _cameraController!.stopImageStream(); } catch (_) {}
-      await _cameraController!.dispose();
-      _cameraController = null;
-    }
-
-    if (_availableCameras.isEmpty) return;
-
-    final cam = _availableCameras.firstWhere(
-      (c) => c.lensDirection == _lens,
-      orElse: () => _availableCameras.first,
-    );
-
-    final controller = CameraController(
-      cam,
-      ResolutionPreset.low,  // Performans optimizasyonu için en ideal çözünürlük
-      enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.yuv420,
-    );
-
-    try {
-      await controller.initialize();
-      if (!mounted) return;
-      setState(() {
-        _cameraController = controller;
-        _isCameraReady = true;
-      });
-    } catch (e) {
-      print("ERROR: Kamera başlatılamadı: $e");
-      return;
-    }
-
-    _cameraController!.startImageStream((CameraImage frame) {
-      _frameCount++;
-      if (_frameCount % _skipFrames != 0) return;
-      if (_isProcessing || !_onnxHelper.isModelLoaded || _cameraController == null) return;
-
-      _isProcessing = true;
-      
-      // Mikro görev kanalını kullanarak pikselleri hiç kopyalamadan C++ motoruna paslıyoruz
-      Future.microtask(() {
-        try {
-          final prediction = _onnxHelper.processYuv420Image(frame);
-          _updateResult(prediction);
-        } finally {
-          _isProcessing = false;
+        if (word == _lastConfirmedWord) {
+          _sameWordCount++;
+        } else {
+          _lastConfirmedWord = word;
+          _sameWordCount = 1;
         }
-      });
-    });
-  }
 
-  /// Kayan pencere oylaması: Kararlılığı zirveye çıkaran mekanizma
-  void _updateResult(String? prediction) {
-    if (!mounted) return;
-
-    if (prediction != null) {
-      _recentPredictions.add(prediction);
-      if (_recentPredictions.length > _windowSize) {
-        _recentPredictions.removeAt(0);
+        // Sadece aynı kelime art arda yeterince görünürse güncelle
+        if (_sameWordCount >= _confirmThreshold &&
+            now.difference(_lastUpdate).inMilliseconds > 800) {
+          _lastUpdate = now;
+          if (_currentWord != word) {
+            setState(() => _currentWord = word);
+          }
+        }
       }
     } else {
-      if (_recentPredictions.isNotEmpty) {
-        _recentPredictions.removeAt(0);
+      // Boş sonuç gelince hemen silme, 2 saniye bekle
+      if (now.difference(_lastUpdate).inMilliseconds > 2000) {
+        _lastConfirmedWord = "";
+        _sameWordCount = 0;
+        _lastUpdate = now;
+        if (_currentWord != "İşaret Bekleniyor...") {
+          setState(() => _currentWord = "İşaret Bekleniyor...");
+        }
       }
     }
-
-    String newResult = "İşaret bekleniyor...";
-    if (_recentPredictions.isNotEmpty) {
-      final freq = <String, int>{};
-      for (final p in _recentPredictions) {
-        freq[p] = (freq[p] ?? 0) + 1;
-      }
-      final best = freq.entries.reduce((a, b) => a.value > b.value ? a : b);
-      
-      // Eğer aynı kelime havuzda en az 2 kez onaylanmışsa ekrana yansıtılır
-      if (best.value >= 2) {
-        newResult = best.key;
-      }
-    }
-
-    if (newResult != _result && mounted) {
-      setState(() => _result = newResult);
-    }
-  }
-
-  void _toggleCamera() {
-    _lens = _lens == CameraLensDirection.back
-        ? CameraLensDirection.front
-        : CameraLensDirection.back;
-    _recentPredictions.clear();
-    _init();
-  }
-
-  @override
-  void dispose() {
-    _cameraController?.dispose();
-    _onnxHelper.dispose();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_isCameraReady || _cameraController == null || !_cameraController!.value.isInitialized) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator(color: Colors.deepPurpleAccent)),
-      );
-    }
-
     return Scaffold(
       body: Stack(
         children: [
-          // Tam Ekran Kamera Önizleme Alanı
-          SizedBox.expand(
-            child: FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                width: _cameraController!.value.previewSize!.height,
-                height: _cameraController!.value.previewSize!.width,
-                child: CameraPreview(_cameraController!),
-              ),
-            ),
+          YOLOView(
+            modelPath: 'assets/models/best_float16.tflite',
+            task: YOLOTask.detect,
+            onResult: _handleResults,
           ),
 
-          // Üst Başlık Paneli
+          // Üst Başlık
           Positioned(
             top: 50, left: 20, right: 20,
             child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+              padding: const EdgeInsets.symmetric(vertical: 12),
               decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(12),
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(15),
               ),
               child: const Center(
                 child: Text(
-                  "CANLI İŞARET DİLİ TERCÜMANI",
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,
-                      letterSpacing: 1.5, color: Colors.white70),
+                  "YOLOv8 CANLI TERCÜMAN",
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 2,
+                  ),
                 ),
               ),
             ),
           ),
 
-          // Kamera Yön Değiştirme Butonu (Ön/Arka)
+          // Alt Çeviri Paneli
           Positioned(
-            top: 110, right: 20,
-            child: FloatingActionButton.small(
-              onPressed: _toggleCamera,
-              backgroundColor: Colors.deepPurple.withOpacity(0.8),
-              child: Icon(
-                _lens == CameraLensDirection.back ? Icons.camera_front : Icons.camera_rear,
-                color: Colors.white,
-              ),
-            ),
-          ),
-
-          // 👑 KRALİÇEMİZİN İSTEDİĞİ ŞIK ALT PANEL
-          Positioned(
-            bottom: 50, left: 25, right: 25,
+            bottom: 40, left: 25, right: 25,
             child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 20),
+              padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: Colors.black87,
+                color: Colors.black.withOpacity(0.85),
                 borderRadius: BorderRadius.circular(25),
-                border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.7), width: 2),
+                border: Border.all(
+                  color: Colors.deepPurpleAccent.withOpacity(0.6),
+                  width: 2,
+                ),
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text("Canlı Çeviri",
-                      style: TextStyle(color: Colors.grey.shade400, fontSize: 11, letterSpacing: 2)),
-                  const SizedBox(height: 10),
                   Text(
-                    _result,
-                    textAlign: TextAlign.center,
+                    "ANLIK ANLAM",
                     style: TextStyle(
-                      fontSize: 30,
-                      fontWeight: FontWeight.bold,
-                      color: _result == "İşaret bekleniyor..." ? Colors.white38 : Colors.greenAccent,
+                      color: Colors.grey.shade500,
+                      fontSize: 10,
+                      letterSpacing: 2,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 400),
+                    child: Text(
+                      _currentWord,
+                      key: ValueKey(_currentWord),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        color: _currentWord == "İşaret Bekleniyor..."
+                            ? Colors.white38
+                            : Colors.greenAccent,
+                      ),
                     ),
                   ),
                 ],

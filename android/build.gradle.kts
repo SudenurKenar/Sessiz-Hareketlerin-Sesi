@@ -24,7 +24,9 @@ subprojects {
     afterEvaluate {
         if (extensions.findByName("android") != null) {
             val android = extensions.getByType<com.android.build.gradle.BaseExtension>()
-            android.compileSdkVersion(35)
+            android.compileSdkVersion(36)
+            // 🚀 Alt paketlerin de minimum SDK sınırını 24'e çekiyoruz:
+            android.defaultConfig.minSdkVersion(24) 
         }
     }
 }
