@@ -13,7 +13,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'İşaret Dili Çevirici',
+      title: 'Sessiz Hareketlerin Sesi',
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: Colors.black,
       ),
@@ -33,36 +33,45 @@ class _SignLanguageScreenState extends State<SignLanguageScreen> {
   String _currentWord = "İşaret Bekleniyor...";
   String _lastConfirmedWord = "";
   int _sameWordCount = 0;
-  static const int _confirmThreshold = 4; // Kaç kez üst üste görünmeli
   DateTime _lastUpdate = DateTime.now();
+
+  // Confidence'a göre kaç tekrar gerekli
+  int _requiredCount(double confidence) {
+    if (confidence >= 0.70) return 2; // Çok emin → hızlı göster
+    if (confidence >= 0.50) return 4; // Orta emin → normal
+    if (confidence >= 0.30) return 7; // Az emin → çok tekrar lazım
+    return 99; // Çok düşük → gösterme
+  }
 
   void _handleResults(List<dynamic> results) {
     final now = DateTime.now();
 
     if (results.isNotEmpty) {
       final top = results.first;
-      if (top.confidence > 0.50) {
-        final word = top.className ?? "";
+      final confidence = top.confidence as double;
+      final word = (top.className ?? "").trim();
 
-        if (word == _lastConfirmedWord) {
-          _sameWordCount++;
-        } else {
-          _lastConfirmedWord = word;
-          _sameWordCount = 1;
-        }
+      if (confidence < 0.30 || word.isEmpty) return;
 
-        // Sadece aynı kelime art arda yeterince görünürse güncelle
-        if (_sameWordCount >= _confirmThreshold &&
-            now.difference(_lastUpdate).inMilliseconds > 800) {
-          _lastUpdate = now;
-          if (_currentWord != word) {
-            setState(() => _currentWord = word);
-          }
+      if (word == _lastConfirmedWord) {
+        _sameWordCount++;
+      } else {
+        _lastConfirmedWord = word;
+        _sameWordCount = 1;
+      }
+
+      final required = _requiredCount(confidence);
+      final cooldown = confidence >= 0.70 ? 500 : 800;
+
+      if (_sameWordCount >= required &&
+          now.difference(_lastUpdate).inMilliseconds > cooldown) {
+        _lastUpdate = now;
+        if (_currentWord != word) {
+          setState(() => _currentWord = word);
         }
       }
     } else {
-      // Boş sonuç gelince hemen silme, 2 saniye bekle
-      if (now.difference(_lastUpdate).inMilliseconds > 2000) {
+      if (now.difference(_lastUpdate).inMilliseconds > 2500) {
         _lastConfirmedWord = "";
         _sameWordCount = 0;
         _lastUpdate = now;
@@ -88,32 +97,47 @@ class _SignLanguageScreenState extends State<SignLanguageScreen> {
           Positioned(
             top: 50, left: 20, right: 20,
             child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 12),
+              padding: const EdgeInsets.symmetric(vertical: 14),
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.5),
+                color: Colors.black.withOpacity(0.6),
                 borderRadius: BorderRadius.circular(15),
               ),
-              child: const Center(
-                child: Text(
-                  "YOLOv8 CANLI TERCÜMAN",
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 2,
+              child: const Column(
+                children: [
+                  Text(
+                    "Sessiz Hareketlerin Sesi",
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.5,
+                      color: Colors.white,
+                    ),
                   ),
-                ),
+                  SizedBox(height: 4),
+                  Text(
+                    "CANLI TERCÜMAN",
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.deepPurpleAccent,
+                      letterSpacing: 3,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
 
-          // Alt Çeviri Paneli
+          // Alt Panel
           Positioned(
-            bottom: 40, left: 25, right: 25,
+            bottom: 0, left: 0, right: 0,
             child: Container(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.fromLTRB(25, 20, 25, 16),
               decoration: BoxDecoration(
                 color: Colors.black.withOpacity(0.85),
-                borderRadius: BorderRadius.circular(25),
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(25),
+                  topRight: Radius.circular(25),
+                ),
                 border: Border.all(
                   color: Colors.deepPurpleAccent.withOpacity(0.6),
                   width: 2,
@@ -146,6 +170,18 @@ class _SignLanguageScreenState extends State<SignLanguageScreen> {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  const Divider(color: Colors.white12),
+                  const SizedBox(height: 8),
+                  const Text(
+                    "Sudenur Kenar & İlayda Kalkan",
+                    style: TextStyle(
+                      color: Colors.white38,
+                      fontSize: 11,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                 ],
               ),
             ),
