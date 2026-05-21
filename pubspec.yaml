@@ -11,9 +11,8 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   
-  # Birbiriyle ve güncel Flutter ile tam uyumlu asil versiyonlar
   camera: ^0.10.5+9
-  onnxruntime: ^1.4.1     # Hatanın kalbini bu güncel sürümle çözüyoruz
+  onnxruntime: ^1.4.1     
   path_provider: ^2.1.3
   image: ^4.3.0
 

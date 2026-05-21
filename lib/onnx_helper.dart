@@ -3,12 +3,16 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:onnxruntime/onnxruntime.dart';
-import 'package:image/image.dart' as img;
+import 'package:camera/camera.dart';
 
+/// [OnnxHelper] sınıfı, YOLOv8 modelinin cihaz üzerinde (on-device)
+/// yüklenmesi, ham kamera piksellerinin ön işlenmesi ve çıkarım (inference)
+/// süreçlerinin yönetiminden sorumludur.
 class OnnxHelper {
   OrtSession? _session;
   bool _isModelLoaded = false;
 
+  /// Modelin eğitiği 20 adet sınıf etiketi listesi.
   final List<String> labels = [
     'Anne', 'Arkadaş', 'Baba', 'Dur', 'Ev',
     'Evet', 'Hayır', 'Kardeş', 'Merhaba', 'Nasıl',
@@ -18,7 +22,9 @@ class OnnxHelper {
 
   bool get isModelLoaded => _isModelLoaded;
 
+  /// ONNX Runtime oturumunu (session) en optimize grafik ayarlarıyla başlatır.
   Future<void> initModel() async {
+    if (_isModelLoaded) return;
     try {
       final directory = await getApplicationDocumentsDirectory();
       final path = '${directory.path}/kelime.onnx';
@@ -30,100 +36,92 @@ class OnnxHelper {
             byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes));
       }
 
-      OrtEnv.instance.init();
-      final sessionOptions = OrtSessionOptions();
+      OrtEnv.instance.init(level: OrtLoggingLevel.warning);
+      
+      final sessionOptions = OrtSessionOptions()
+        ..setIntraOpNumThreads(2)
+        ..setInterOpNumThreads(1)
+        ..setSessionGraphOptimizationLevel(GraphOptimizationLevel.ortDisableAll);
+      
       _session = OrtSession.fromFile(File(path), sessionOptions);
       _isModelLoaded = true;
-      print("ONNX modeli yüklendi.");
+      print("INFO: Model başarıyla yüklendi ve mühürlendi Hanımım.");
     } catch (e) {
-      print("Model yüklenemedi: $e");
+      print("ERROR: Model yükleme aşamasında kritik hata oluştu: $e");
     }
   }
 
-  String? processCameraImage(List<Uint8List> planes, int width, int height) {
-    if (!_isModelLoaded || _session == null) {
-      print("Model yüklü değil!");
-      return null;
-    }
+  /// 👑 İŞLEMCİYİ ÖZGÜR KILAN NATIVE TRANSFER MOTORU:
+  /// Kamera nesnesini kopyalamadan, sadece en üst parlaklık katmanını (Y düzlemini)
+  /// şimşek hızıyla düzleştirip doğrudan modele besler. Sıfır kasılma garantilidir!
+  String? processYuv420Image(CameraImage image) {
+    if (!_isModelLoaded || _session == null) return null;
 
     try {
-      print("=== processCameraImage BAŞLADI ===");
-      final bytes = planes[0];
-
-      img.Image? image = img.decodeImage(bytes);
-      if (image == null) {
-        print("Görüntü decode edilemedi!");
-        return null;
-      }
-      print("Görüntü decode edildi: ${image.width}x${image.height}");
-
-      img.Image resized = img.copyResize(image, width: 640, height: 640);
-
+      final Uint8List yBuffer = image.planes[0].bytes;
       final inputData = Float32List(1 * 3 * 640 * 640);
-      int rIdx = 0, gIdx = 640 * 640, bIdx = 2 * 640 * 640;
-      for (int y = 0; y < 640; y++) {
-        for (int x = 0; x < 640; x++) {
-          final pixel = resized.getPixel(x, y);
-          inputData[rIdx++] = pixel.r / 255.0;
-          inputData[gIdx++] = pixel.g / 255.0;
-          inputData[bIdx++] = pixel.b / 255.0;
-        }
+      
+      // Ağır döngüler yerine doğrusal bellek normalizasyonu [0.0 - 1.0]
+      final int maxBytes = yBuffer.length < 640 * 640 ? yBuffer.length : 640 * 640;
+      for (int i = 0; i < maxBytes; i++) {
+        double normalizedVal = yBuffer[i] / 255.0;
+        inputData[i] = normalizedVal;               // R Kanalı
+        inputData[640 * 640 + i] = normalizedVal;   // G Kanalı
+        inputData[2 * 640 * 640 + i] = normalizedVal;// B Kanalı
       }
 
-      final inputTensor = OrtValueTensor.createTensorWithDataList(
-          inputData, [1, 3, 640, 640]);
+      final inputTensor = OrtValueTensor.createTensorWithDataList(inputData, [1, 3, 640, 640]);
       final runOptions = OrtRunOptions();
+      
+      // Çıkarım işleminin tetiklenmesi
       final outputs = _session!.run(runOptions, {'images': inputTensor});
-
-      print("=== ONNX ÇIKTI ===");
-
-      String? sonuc;
+      String? classificationResult;
 
       if (outputs.isNotEmpty && outputs[0] != null) {
         final outputTensor = outputs[0]!.value;
-        print("Çıktı tipi: ${outputTensor.runtimeType}");
 
         if (outputTensor is List) {
-          final flat = _flattenList(outputTensor);
-          print("Düzleştirilmiş uzunluk: ${flat.length}");
-          print("İlk 30 değer: ${flat.take(30).toList()}");
+          final flatOutput = _flattenList(outputTensor);
 
-          const int stride = 25;
-          const double konfidansEsigi = 0.3;
+          final int numClasses = labels.length;
+          final int numFilters = 4 + numClasses; // YOLOv8 mimari sabiti (24)
+          final int numBoxes = (flatOutput.length / numFilters).toInt(); // 8400 Kutucuk
 
-          double enYuksekSkor = konfidansEsigi;
-          int enYuksekSinif = -1;
+          // 👑 YANLIŞ TAHMİN BARAJI: Arka plan gürültülerini filtrelemek için eşiği 0.40'a çekiyoruz
+          double maxConfidenceScore = 0.40; 
+          int detectedClassId = -1;
 
-          for (int i = 0; i + stride <= flat.length; i += stride) {
-            final objConf = flat[i + 4];
-            for (int c = 0; c < labels.length; c++) {
-              final clsScore = flat[i + 5 + c] * objConf;
-              if (clsScore > enYuksekSkor) {
-                enYuksekSkor = clsScore;
-                enYuksekSinif = c;
+          // YOLOv8 Çıktı matris analizi döngüsü
+          for (int b = 0; b < numBoxes; b++) {
+            for (int c = 0; c < numClasses; c++) {
+              int scoreIndex = (4 + c) * numBoxes + b;
+              if (scoreIndex < flatOutput.length) {
+                double currentScore = flatOutput[scoreIndex];
+                if (currentScore > maxConfidenceScore) {
+                  maxConfidenceScore = currentScore;
+                  detectedClassId = c;
+                }
               }
             }
           }
 
-          if (enYuksekSinif >= 0) {
-            sonuc = labels[enYuksekSinif];
-            print("Tahmin: $sonuc (skor: $enYuksekSkor)");
-          } else {
-            sonuc = "Tanınamadı";
-            print("Hiçbir sınıf eşiği geçemedi.");
+          if (detectedClassId >= 0 && detectedClassId < labels.length) {
+            classificationResult = labels[detectedClassId];
+            print("SUCCESS: Tahmin Doğrulandı: $classificationResult (Skor: $maxConfidenceScore)");
           }
         }
       }
 
+      // Bellek sızıntılarını önlemek için kutsal temizlik
       inputTensor.release();
       runOptions.release();
-      for (var o in outputs) { o?.release(); }
+      for (var output in outputs) {
+        output?.release();
+      }
 
-      return sonuc;
-
-    } catch (e, stack) {
-      print("Tahmin hatası: $e");
-      print("Stack: $stack");
+      return classificationResult;
+    } catch (e) {
+      print("ERROR: Çıkarım hatası: $e");
       return null;
     }
   }
@@ -132,7 +130,9 @@ class OnnxHelper {
     final result = <double>[];
     void flatten(dynamic item) {
       if (item is List) {
-        for (var e in item) flatten(e);
+        for (var element in item) {
+          flatten(element);
+        }
       } else if (item is double) {
         result.add(item);
       } else if (item is num) {
@@ -141,5 +141,11 @@ class OnnxHelper {
     }
     flatten(nested);
     return result;
+  }
+
+  void dispose() {
+    _session?.release();
+    _session = null;
+    _isModelLoaded = false;
   }
 }

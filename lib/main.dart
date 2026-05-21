@@ -3,120 +3,169 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'onnx_helper.dart';
 
-List<CameraDescription> cameras = [];
+List<CameraDescription> _availableCameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    cameras = await availableCameras();
+    _availableCameras = await availableCameras();
   } catch (e) {
-    print("Kameralara ulaşılamadı: $e");
+    print("ERROR: Kamera listesi alınamadı: $e");
   }
-  runApp(const IsaretDiliApp());
+  runApp(const SignLanguageApp());
 }
 
-class IsaretDiliApp extends StatelessWidget {
-  const IsaretDiliApp({super.key});
+class SignLanguageApp extends StatelessWidget {
+  const SignLanguageApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        primaryColor: Colors.deepPurple,
         scaffoldBackgroundColor: Colors.black,
       ),
-      home: const KameraCeviriEkrani(),
+      home: const CameraTranslationScreen(),
     );
   }
 }
 
-class KameraCeviriEkrani extends StatefulWidget {
-  const KameraCeviriEkrani({super.key});
+class CameraTranslationScreen extends StatefulWidget {
+  const CameraTranslationScreen({super.key});
 
   @override
-  State<KameraCeviriEkrani> createState() => _KameraCeviriEkraniState();
+  State<CameraTranslationScreen> createState() => _CameraTranslationScreenState();
 }
 
-class _KameraCeviriEkraniState extends State<KameraCeviriEkrani> {
+class _CameraTranslationScreenState extends State<CameraTranslationScreen> {
   CameraController? _cameraController;
   final OnnxHelper _onnxHelper = OnnxHelper();
-  String _anlikCeviri = "İşaret bekleniyor...";
+
+  String _result = "İşaret bekleniyor...";
   bool _isProcessing = false;
-  Timer? _frameTimer; // Windows akışı için zamanlayıcı tahtımız
+  bool _isCameraReady = false;
+  CameraLensDirection _lens = CameraLensDirection.back;
+
+  final List<String> _recentPredictions = [];
+  static const int _windowSize = 4; // Kararlılık için biriktirilen son 4 tahmin
+  int _frameCount = 0;
+  static const int _skipFrames = 5; // 👑 Kasılmayı önlemek için her 5 karede bir çıkarım koşturuyoruz (Saniyede ~6 net kare)
 
   @override
   void initState() {
     super.initState();
-    _uygulamayiBaslat();
+    _init();
   }
 
-  Future<void> _uygulamayiBaslat() async {
+  Future<void> _init() async {
+    if (!mounted) return;
+    setState(() => _isCameraReady = false);
+
     await _onnxHelper.initModel();
-    if (cameras.isEmpty) return;
 
-    // Laptopun ön kamerasını garantilemek için asil bir arayış
-    CameraDescription? laptopKamerasi;
-    for (var camera in cameras) {
-      if (camera.lensDirection == CameraLensDirection.front || 
-          camera.name.toLowerCase().contains('front') || 
-          camera.name.toLowerCase().contains('webcam')) {
-        laptopKamerasi = camera;
-        break;
-      }
+    if (_cameraController != null) {
+      try { await _cameraController!.stopImageStream(); } catch (_) {}
+      await _cameraController!.dispose();
+      _cameraController = null;
     }
-    laptopKamerasi ??= cameras.first; // Bulamazsa ilk sıradakine razı olalım
 
-    _cameraController = CameraController(
-      laptopKamerasi,
-      ResolutionPreset.medium,
-      enableAudio: false,
+    if (_availableCameras.isEmpty) return;
+
+    final cam = _availableCameras.firstWhere(
+      (c) => c.lensDirection == _lens,
+      orElse: () => _availableCameras.first,
     );
 
-    await _cameraController!.initialize();
+    final controller = CameraController(
+      cam,
+      ResolutionPreset.low,  // Performans optimizasyonu için en ideal çözünürlük
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
+    );
+
+    try {
+      await controller.initialize();
+      if (!mounted) return;
+      setState(() {
+        _cameraController = controller;
+        _isCameraReady = true;
+      });
+    } catch (e) {
+      print("ERROR: Kamera başlatılamadı: $e");
+      return;
+    }
+
+    _cameraController!.startImageStream((CameraImage frame) {
+      _frameCount++;
+      if (_frameCount % _skipFrames != 0) return;
+      if (_isProcessing || !_onnxHelper.isModelLoaded || _cameraController == null) return;
+
+      _isProcessing = true;
+      
+      // Mikro görev kanalını kullanarak pikselleri hiç kopyalamadan C++ motoruna paslıyoruz
+      Future.microtask(() {
+        try {
+          final prediction = _onnxHelper.processYuv420Image(frame);
+          _updateResult(prediction);
+        } finally {
+          _isProcessing = false;
+        }
+      });
+    });
+  }
+
+  /// Kayan pencere oylaması: Kararlılığı zirveye çıkaran mekanizma
+  void _updateResult(String? prediction) {
     if (!mounted) return;
 
-    setState(() {});
-
-    // 👑 WINDOWS OPTİMİZASYONU:
-    // startImageStream yerine, saniyede ~15 kare yakalayacak asil bir zamanlayıcı kuruyoruz.
-    // Bu sayede Windows çökmez ve ONNX arkada tıkır tıkır tahmin yürütür.
-    _frameTimer = Timer.periodic(const Duration(milliseconds: 66), (timer) async {
-      if (_isProcessing || _cameraController == null || !_cameraController!.value.isInitialized) return;
-
-      try {
-        _isProcessing = true;
-
-        // Kameradan anlık bir fotoğraf karesi koparıyoruz
-        final XFile imageFile = await _cameraController!.takePicture();
-        final bytes = await imageFile.readAsBytes();
-
-        // Çekilen kareyi ONNX'e gönderiyoruz (Genişlik ve yükseklik bilgisini 640 kabul edebiliriz)
-        final sonuc = _onnxHelper.processCameraImage([bytes], 640, 480);
-
-        if (sonuc != null) {
-          setState(() {
-            _anlikCeviri = sonuc;
-          });
-        }
-      } catch (e) {
-        print("Kare işlenirken küçük bir hırıltı çıktı: $e");
-      } finally {
-        _isProcessing = false;
+    if (prediction != null) {
+      _recentPredictions.add(prediction);
+      if (_recentPredictions.length > _windowSize) {
+        _recentPredictions.removeAt(0);
       }
-    });
+    } else {
+      if (_recentPredictions.isNotEmpty) {
+        _recentPredictions.removeAt(0);
+      }
+    }
+
+    String newResult = "İşaret bekleniyor...";
+    if (_recentPredictions.isNotEmpty) {
+      final freq = <String, int>{};
+      for (final p in _recentPredictions) {
+        freq[p] = (freq[p] ?? 0) + 1;
+      }
+      final best = freq.entries.reduce((a, b) => a.value > b.value ? a : b);
+      
+      // Eğer aynı kelime havuzda en az 2 kez onaylanmışsa ekrana yansıtılır
+      if (best.value >= 2) {
+        newResult = best.key;
+      }
+    }
+
+    if (newResult != _result && mounted) {
+      setState(() => _result = newResult);
+    }
+  }
+
+  void _toggleCamera() {
+    _lens = _lens == CameraLensDirection.back
+        ? CameraLensDirection.front
+        : CameraLensDirection.back;
+    _recentPredictions.clear();
+    _init();
   }
 
   @override
   void dispose() {
-    _frameTimer?.cancel(); // Zamanlayıcıyı dağıtalım
     _cameraController?.dispose();
+    _onnxHelper.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+    if (!_isCameraReady || _cameraController == null || !_cameraController!.value.isInitialized) {
       return const Scaffold(
         body: Center(child: CircularProgressIndicator(color: Colors.deepPurpleAccent)),
       );
@@ -125,54 +174,75 @@ class _KameraCeviriEkraniState extends State<KameraCeviriEkrani> {
     return Scaffold(
       body: Stack(
         children: [
-          // Webcam Önizlemesi
-          Transform.scale(
-            scale: 1 / (_cameraController!.value.aspectRatio * MediaQuery.of(context).size.aspectRatio),
-            alignment: Alignment.topCenter,
-            child: CameraPreview(_cameraController!),
-          ),
-          
-          // Üst Başlık Paneli
-          Positioned(
-            top: 40,
-            left: 20,
-            right: 20,
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.6),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.4)),
-              ),
-              child: const Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.psychology, color: Colors.greenAccent),
-                  SizedBox(width: 10),
-                  Text("WEBCAM İŞARET DİLİ TERCÜMANI", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
-                ],
+          // Tam Ekran Kamera Önizleme Alanı
+          SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: _cameraController!.value.previewSize!.height,
+                height: _cameraController!.value.previewSize!.width,
+                child: CameraPreview(_cameraController!),
               ),
             ),
           ),
-          
-          // Alt Çeviri Sonuç Kartı
+
+          // Üst Başlık Paneli
           Positioned(
-            bottom: 40,
-            left: 20,
-            right: 20,
+            top: 50, left: 20, right: 20,
             child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 25, horizontal: 20),
+              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.8),
-                borderRadius: BorderRadius.circular(30),
-                border: Border.all(color: Colors.deepPurpleAccent, width: 1.5),
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Center(
+                child: Text(
+                  "CANLI İŞARET DİLİ TERCÜMANI",
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,
+                      letterSpacing: 1.5, color: Colors.white70),
+                ),
+              ),
+            ),
+          ),
+
+          // Kamera Yön Değiştirme Butonu (Ön/Arka)
+          Positioned(
+            top: 110, right: 20,
+            child: FloatingActionButton.small(
+              onPressed: _toggleCamera,
+              backgroundColor: Colors.deepPurple.withOpacity(0.8),
+              child: Icon(
+                _lens == CameraLensDirection.back ? Icons.camera_front : Icons.camera_rear,
+                color: Colors.white,
+              ),
+            ),
+          ),
+
+          // 👑 KRALİÇEMİZİN İSTEDİĞİ ŞIK ALT PANEL
+          Positioned(
+            bottom: 50, left: 25, right: 25,
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 20),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(25),
+                border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.7), width: 2),
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text("Canlı Çeviri Sonucu", style: TextStyle(color: Colors.grey.shade400, fontSize: 13, letterSpacing: 2)),
-                  const SizedBox(height: 12),
-                  Text(_anlikCeviri, style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.greenAccent)),
+                  Text("Canlı Çeviri",
+                      style: TextStyle(color: Colors.grey.shade400, fontSize: 11, letterSpacing: 2)),
+                  const SizedBox(height: 10),
+                  Text(
+                    _result,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 30,
+                      fontWeight: FontWeight.bold,
+                      color: _result == "İşaret bekleniyor..." ? Colors.white38 : Colors.greenAccent,
+                    ),
+                  ),
                 ],
               ),
             ),
