@@ -1,4 +1,4 @@
-# 🤟 Sessiz Hareketlerin Sesi
+# Sessiz Hareketlerin Sesi
 
 Gerçek zamanlı işaret dili çeviri uygulaması. YOLOv8 nesne tespiti modeli ve Flutter kullanılarak geliştirilmiştir.
 
