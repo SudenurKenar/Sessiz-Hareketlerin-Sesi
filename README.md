@@ -32,7 +32,7 @@ Anne, Arkadaş, Baba, Dur, Ev, Evet, Hayır, Kardeş, Merhaba, Nasıl, Nerede, �
 - Format: TFLite Float16
 - Girdi boyutu: 640x640
 - Sınıf sayısı: 20
-- Eğitim verisi: Özel çekilmiş işaret dili veri seti
+- Eğitim verisi: [Türk İşaret Dili — Roboflow Universe](https://universe.roboflow.com/proje-qtjgs/turk-isaret-dili/dataset/1)
 
 ## 📋 Gereksinimler
 
